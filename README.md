@@ -11,11 +11,11 @@ pip install -r requirements.txt
 ## Prepare dataset
 
 ```
-python code/prepare_data.py
+python codes/prepare_data.py
 ```
 
 ## Model training
 
 ```
-python code/main.py
+python codes/main.py
 ```
