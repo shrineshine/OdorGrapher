@@ -1,0 +1,14 @@
+deepchem==2.8.0
+dgl==2.4.0+cu124
+dgllife==0.3.2
+matplotlib==3.8.4
+numpy==2.3.5
+openpom==0.2.3
+pandas==2.3.3
+pyrfume==0.20
+rdkit==2023.9.6
+scikit_learn==1.8.0
+scikit_multilearn==0.2.0
+seaborn==0.13.2
+torch==2.4.0+cu124
+tqdm==4.67.1
