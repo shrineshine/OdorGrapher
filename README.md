@@ -1,8 +1,21 @@
 # OdorGrapher
 
-## Usage
+## Set up the Python environment
 
-Run the preprocessing script to generate processed odor data and DeepChem graph datasets:
 ```
-python src/prepare_training_data.py
+conda create -n odorgrapher python=3.9
+conda activate odorgrapher
+pip install -r requirements.txt
+```
+
+## Prepare dataset
+
+```
+python code/prepare_data.py
+```
+
+## Model training
+
+```
+python code/main.py
 ```
