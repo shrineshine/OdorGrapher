@@ -1,12 +1,25 @@
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union, Dict, Sequence, Set
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
-from typing import List, Union, Dict, Sequence, Set
 from deepchem.utils.typing import RDKitAtom, RDKitBond, RDKitMol
 from deepchem.feat.base_classes import MolecularFeaturizer
 from deepchem.feat.graph_data import GraphData
 from deepchem.utils.molecule_feature_utils import one_hot_encode
+
+def modify_molecule_for_test(smiles: str, action: str) -> str:
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None: return smiles
+    if action == "saturate":
+        for bond in mol.GetBonds():
+            if bond.GetBondType() == Chem.rdchem.BondType.DOUBLE:
+                bond.SetBondType(Chem.rdchem.BondType.SINGLE)
+        Chem.SanitizeMol(mol)
+    elif action == "reduce_aldehyde":
+        rxn = AllChem.ReactionFromSmarts('[CX3H1:1](=O)[#6:2]>>[CX4H2:1](O)[#6:2]')
+        ps = rxn.RunReactants((mol,))
+        if ps: mol = ps[0][0]
+    return Chem.MolToSmiles(mol)
 
 SMARTS_GROUPS = {
     'carbonyl': '[CX3]=[OX1]',
@@ -27,17 +40,9 @@ SMARTS_GROUPS = {
 }
 SMARTS_PATTERNS = {name: Chem.MolFromSmarts(s) for name, s in SMARTS_GROUPS.items()}
 
-def get_functional_group_tags(mol: Chem.Mol) -> Dict[str, Set[int]]:
-    tag_dict = {name: set() for name in SMARTS_GROUPS}
-    for name, pattern in SMARTS_PATTERNS.items():
-        matches = mol.GetSubstructMatches(pattern)
-        for match in matches:
-            tag_dict[name].update(match)
-    return tag_dict
-
-class GraphConstants(object):
+class GraphConstants:
     MAX_ATOMIC_NUM = 100
-    ATOM_FEATURES: Dict[str, List[int]] = {
+    ATOM_FEATURES = {
         'valence': [0, 1, 2, 3, 4, 5, 6],
         'degree': [0, 1, 2, 3, 4, 5],
         'num_Hs': [0, 1, 2, 3, 4],
@@ -45,151 +50,95 @@ class GraphConstants(object):
         'atomic_num': list(range(MAX_ATOMIC_NUM)),
         'hybridization': ["SP", "SP2", "SP3"]
     }
-    ATOM_FDIM = 147
     BOND_FDIM = 7
 
-def atom_features(atom: Chem.Atom, mol: Chem.Mol, atom_idx: int, fg_tags: Dict[str, Set[int]]) -> Sequence[Union[bool, int, float]]:
+def atom_features(atom: Chem.Atom, 
+                  mol: Chem.Mol, 
+                  atom_idx: int, 
+                  fg_tags: Optional[Dict[str, Set[int]]] = None) -> List[float]:
     if atom is None:
-        features: Sequence[Union[bool, int, float]] = [0] * GraphConstants.ATOM_FDIM
-    else:
-        features = []
-        features += one_hot_encode(atom.GetTotalValence(), GraphConstants.ATOM_FEATURES['valence'])
-        features += one_hot_encode(atom.GetTotalDegree(), GraphConstants.ATOM_FEATURES['degree'])
-        features += one_hot_encode(atom.GetTotalNumHs(), GraphConstants.ATOM_FEATURES['num_Hs'])
-        features += one_hot_encode(atom.GetFormalCharge(), GraphConstants.ATOM_FEATURES['formal_charge'])
-        features += one_hot_encode(atom.GetAtomicNum()-1, GraphConstants.ATOM_FEATURES['atomic_num'])
-        features += [int(atom.GetIsAromatic())]
-        features += [int(atom.IsInRing())]
-        features += [int(atom.HasProp("_ChiralityPossible"))]
-        features += one_hot_encode(str(atom.GetHybridization()), GraphConstants.ATOM_FEATURES['hybridization'])
-
-        try:
-            val = atom.GetProp('_GasteigerCharge')
-            gasteiger_charge = float(val)
-            if not np.isfinite(gasteiger_charge):
-                gasteiger_charge = 0.0
-        except KeyError:
-            gasteiger_charge = 0.0
-        features += [gasteiger_charge]
-        atomic_mass = atom.GetMass()
-        features += [atomic_mass]    
+        expected_dim = 132 + (len(SMARTS_GROUPS) if fg_tags is not None else 0)
+        return [0.0] * expected_dim
+    
+    features = []
+    features += one_hot_encode(atom.GetTotalValence(), GraphConstants.ATOM_FEATURES['valence'])
+    features += one_hot_encode(atom.GetTotalDegree(), GraphConstants.ATOM_FEATURES['degree'])
+    features += one_hot_encode(atom.GetTotalNumHs(), GraphConstants.ATOM_FEATURES['num_Hs'])
+    features += one_hot_encode(atom.GetFormalCharge(), GraphConstants.ATOM_FEATURES['formal_charge'])
+    features += one_hot_encode(atom.GetAtomicNum()-1, GraphConstants.ATOM_FEATURES['atomic_num'])
+    features += [float(atom.GetIsAromatic()), float(atom.IsInRing()), float(atom.HasProp("_ChiralityPossible"))]
+    features += one_hot_encode(str(atom.GetHybridization()), GraphConstants.ATOM_FEATURES['hybridization'])
+    
+    try:
+        gasteiger = float(atom.GetProp('_GasteigerCharge'))
+        features.append(gasteiger if np.isfinite(gasteiger) else 0.0)
+    except:
+        features.append(0.0)
+    features.append(atom.GetMass() * 0.01) 
+                      
+    if fg_tags is not None:
         for name in SMARTS_GROUPS:
             features.append(1.0 if atom_idx in fg_tags[name] else 0.0)
+            
     return features
 
-
-def bond_features(bond: RDKitBond) -> Sequence[Union[bool, int, float]]:
-    if bond is None:
-        b_features: Sequence[Union[bool, int, float]] = [1] + [0] * (GraphConstants.BOND_FDIM - 1)
-    else:
-        bt = bond.GetBondType()
-        b_features = [
-            0, bt == Chem.rdchem.BondType.SINGLE,
-            bt == Chem.rdchem.BondType.DOUBLE,
-            bt == Chem.rdchem.BondType.TRIPLE,
-            bt == Chem.rdchem.BondType.AROMATIC,
-            bond.GetIsConjugated(),
-            bond.IsInRing()
-        ]
-    return b_features
-
-def compute_mol_descriptors(mol: Chem.Mol) -> np.ndarray:
-    desc = []
-
-    desc.append(rdMolDescriptors.CalcExactMolWt(mol))
-    desc.append(rdMolDescriptors.CalcNumHeavyAtoms(mol))
-    num_aromatic_atoms = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
-    desc.append(num_aromatic_atoms)
-    desc.append(Descriptors.TPSA(mol))
-    desc.append(Descriptors.NumHDonors(mol))
-    desc.append(Descriptors.NumHAcceptors(mol))
-    desc.append(Descriptors.MolLogP(mol))
-    desc.append(Descriptors.NumRotatableBonds(mol))
-    desc.append(Descriptors.RingCount(mol))
-    desc.append(rdMolDescriptors.CalcNumAromaticRings(mol))
-    desc.append(rdMolDescriptors.CalcFractionCSP3(mol))
-    desc.append(Chem.GetFormalCharge(mol))
-    try:
-        AllChem.ComputeGasteigerCharges(mol)
-        g_charges = []
-        for atom in mol.GetAtoms():
-            try:
-                val = float(atom.GetProp('_GasteigerCharge'))
-                if not np.isfinite(val):
-                    val = 0.0
-            except:
-                val = 0.0
-            g_charges.append(val)
-        desc.append(np.mean(g_charges))
-        desc.append(np.std(g_charges))
-    except Exception as e:
-        desc.append(0.0)
-        desc.append(0.0)
-    return np.array(desc, dtype=np.float32)
-
 class GraphFeaturizer(MolecularFeaturizer):
-    def __init__(self, is_adding_hs=False):
+    def __init__(self, is_adding_hs: bool = False, use_fg_features: bool = True):
         self.is_adding_hs = is_adding_hs
-        super(GraphFeaturizer).__init__()
+        self.use_fg_features = use_fg_features
+        super().__init__()
 
-    def _construct_bond_index(self, datapoint: RDKitMol) -> np.ndarray:
-        src: List[int] = []
-        dest: List[int] = []
-        for bond in datapoint.GetBonds():
-            start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-            src += [start, end]
-            dest += [end, start]
-        return np.asarray([src, dest], dtype=int)
     def _featurize(self, datapoint: RDKitMol, **kwargs) -> GraphData:
-        if isinstance(datapoint, Chem.rdchem.Mol):
-            if self.is_adding_hs:
-                datapoint = Chem.AddHs(datapoint)
-        else:
-            raise ValueError("Feature field should contain smiles")
-    
-        mol = datapoint
-        smiles = Chem.MolToSmiles(mol)
+        if not isinstance(datapoint, Chem.Mol):
+            raise ValueError("Input must be an RDKit Mol object.")
 
+        mol = Chem.AddHs(datapoint) if self.is_adding_hs else datapoint
+        
         try:
-            AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+            mol.UpdatePropertyCache()
             AllChem.ComputeGasteigerCharges(mol)
-        except Exception as e:
-            print(f"{formula} : error ({str(e)})")
+        except:
+            pass
 
-        fg_tags = get_functional_group_tags(mol)
-        f_atoms: np.ndarray = np.asarray(
-            [atom_features(atom, mol, idx, fg_tags) for idx, atom in enumerate(mol.GetAtoms())],
-            dtype=float
-        )
-    
-        mol_features = compute_mol_descriptors(mol)
+        fg_tags = None
+        if self.use_fg_features:
+            fg_tags = {name: set() for name in SMARTS_GROUPS}
+            for name, pattern in SMARTS_PATTERNS.items():
+                if pattern:
+                    matches = mol.GetSubstructMatches(pattern)
+                    for match in matches:
+                        fg_tags[name].update(match)
 
-        if len(datapoint.GetBonds()) == 0:
-            f_bonds: np.ndarray = np.empty((0, GraphConstants.BOND_FDIM))
+        f_atoms = np.asarray([
+            atom_features(atom, mol, i, fg_tags) 
+            for i, atom in enumerate(mol.GetAtoms())
+        ], dtype=np.float32)
+
+        if mol.GetNumBonds() == 0:
+            edge_index = np.empty((2, 0), dtype=int)
+            edge_features = np.empty((0, GraphConstants.BOND_FDIM), dtype=np.float32)
         else:
-            f_bonds_list = []
-            for bond in datapoint.GetBonds():
-                b_feat = 2 * [bond_features(bond)]
-                f_bonds_list.extend(b_feat)
-            f_bonds = np.asarray(f_bonds_list, dtype=float)
-        edge_index: np.ndarray = self._construct_bond_index(datapoint)
-
-        arrays_to_check = {
-            "node_features": f_atoms,
-            "edge_features": f_bonds,
-            "edge_index": edge_index,
-            "mol_features": mol_features
-        }
-    
-        for name, array in arrays_to_check.items():
-            if np.isnan(array).any():
-                print(f"\n[ERROR] Molecule {formula} has NaN in {name}!")
-                nan_locs = np.argwhere(np.isnan(array))
-                print(f"NaN indices in {name}: {nan_locs}")
-                print(f"{name} contents:\n{array}")
-                raise ValueError(f"NaN detected in {name} for molecule {formula}.")
-
-        return GraphData(node_features=f_atoms,
-                         edge_index=edge_index,
-                         edge_features=f_bonds,
-                         mol_features=mol_features)
+            edge_indices, edge_feats = [], []
+            for bond in mol.GetBonds():
+                i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                edge_indices.extend([[i, j], [j, i]])
+                bt = bond.GetBondType()
+                b_feat = [
+                    0.0, 
+                    float(bt == Chem.rdchem.BondType.SINGLE),
+                    float(bt == Chem.rdchem.BondType.DOUBLE),
+                    float(bt == Chem.rdchem.BondType.TRIPLE),
+                    float(bt == Chem.rdchem.BondType.AROMATIC),
+                    float(bond.GetIsConjugated()),
+                    float(bond.IsInRing())
+                ]
+                edge_feats.extend([b_feat, b_feat])
+            
+            edge_index = np.array(edge_indices, dtype=int).T
+            edge_features = np.array(edge_feats, dtype=np.float32)
+            
+        return GraphData(
+            node_features=f_atoms,
+            edge_index=edge_index,
+            edge_features=edge_features
+        )
